@@ -43,7 +43,7 @@ graph TD
     CollectionsTable -.->|AFTER INSERT/UPDATE/DELETE| TriggerFunction
     TriggerFunction -->|Auto Logs Old/New Snapshots| AuditLogsTable
     
-    Controllers -->|io.to(space_id).emit()| SocketIO
+    Controllers -->|"io.to(space_id).emit()"| SocketIO
     SocketIO -.->|Live Event: COLLECTION_MUTATED| Client1
     SocketIO -.->|Live Event: COLLECTION_MUTATED| Client2
 ```
