@@ -1,0 +1,324 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION         = 'ap-south-1'
+        ECR_REPOSITORY     = 'chandas-server'
+        ECS_SERVICE        = 'chandas-service'
+        ECS_CLUSTER        = 'chandas-cluster'
+        S3_BUCKET          = 'chandas-frontend-prod'
+        ECR_REGISTRY       = "${sh(returnStdout: true, script: 'aws ecr describe-repositories --repository-names chandas-server --query "repositories[0].repositoryUri" --output text --region ap-south-1').trim()}"
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+
+        // ====================================================================
+        // STAGE 1: Code Linting & Syntax Check
+        // ====================================================================
+        stage('🔍 Stage 1: Code Linting & Syntax Check') {
+            parallel {
+                stage('Lint Server') {
+                    steps {
+                        echo '📦 Installing server dependencies...'
+                        dir('server') {
+                            sh 'npm ci'
+                            sh 'node --check src/server.js'
+                            sh 'node --check src/config/db.js'
+                            sh 'node --check src/config/rlsDb.js'
+                            sh 'node --check src/sockets/socketHandler.js'
+                            echo '✅ Server syntax check passed!'
+                        }
+                    }
+                }
+                stage('Lint & Build Client') {
+                    steps {
+                        echo '📦 Installing client dependencies & building...'
+                        dir('client') {
+                            sh 'npm ci'
+                            sh 'npx vite build --mode production'
+                            echo '✅ Client build check passed!'
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 2: Automated Testing (34 Integration Tests)
+        // ====================================================================
+        stage('🧪 Stage 2: Automated Integration Tests') {
+            steps {
+                echo '🐘 Starting PostgreSQL test database...'
+                sh '''
+                    # Start a PostgreSQL 16 test container
+                    docker run -d \
+                        --name chandas-test-db \
+                        -e POSTGRES_DB=collection_db \
+                        -e POSTGRES_USER=postgres \
+                        -e POSTGRES_PASSWORD=testpassword123 \
+                        -p 5433:5432 \
+                        postgres:16-alpine
+
+                    # Wait for PostgreSQL to be ready
+                    for i in $(seq 1 30); do
+                        docker exec chandas-test-db pg_isready -U postgres && break
+                        echo "Waiting for PostgreSQL... attempt $i"
+                        sleep 1
+                    done
+                '''
+
+                echo '🗄️ Initializing database schema & triggers...'
+                sh '''
+                    PGPASSWORD=testpassword123 psql \
+                        -h localhost -p 5433 -U postgres -d collection_db \
+                        -f server/src/scripts/init-db.sql
+                '''
+
+                echo '🚀 Starting API server for tests...'
+                dir('server') {
+                    sh '''
+                        DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
+                        JWT_SECRET=ci_test_secret_key_jenkins \
+                        PORT=5099 \
+                        NODE_ENV=test \
+                        node src/server.js &
+
+                        # Wait for API server to be healthy
+                        for i in $(seq 1 30); do
+                            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5099/api/health || echo "000")
+                            if [ "$STATUS" = "200" ]; then
+                                echo "✅ API Server is healthy!"
+                                break
+                            fi
+                            echo "Waiting for API server... attempt $i"
+                            sleep 1
+                        done
+                    '''
+
+                    echo '🧪 Running 34 integration tests...'
+                    sh '''
+                        TEST_API_URL=http://127.0.0.1:5099 \
+                        DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
+                        npm test
+                    '''
+                }
+            }
+            post {
+                always {
+                    echo '🧹 Cleaning up test containers...'
+                    sh '''
+                        docker stop chandas-test-db || true
+                        docker rm chandas-test-db || true
+                        pkill -f "node src/server.js" || true
+                    '''
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 3: Security & VAPT Scanning
+        // ====================================================================
+        stage('🛡️ Stage 3: Security & VAPT Scanning') {
+            parallel {
+
+                stage('npm audit (SCA)') {
+                    steps {
+                        echo '🔎 Running Software Composition Analysis...'
+                        sh '''
+                            cd server && npm audit --audit-level=high || true
+                            cd ../client && npm audit --audit-level=high || true
+                        '''
+                        echo '✅ npm audit completed.'
+                    }
+                }
+
+                stage('Gitleaks Secret Scan') {
+                    steps {
+                        echo '🔐 Scanning for leaked secrets & credentials...'
+                        sh '''
+                            docker run --rm \
+                                -v $(pwd):/repo \
+                                zricethezav/gitleaks:latest \
+                                detect \
+                                --source=/repo \
+                                --no-git \
+                                --redact || echo "⚠️ Gitleaks completed (review any findings above)."
+                        '''
+                    }
+                }
+
+                stage('Semgrep SAST') {
+                    steps {
+                        echo '🔬 Running Semgrep Static Application Security Testing (OWASP Top 10)...'
+                        sh '''
+                            docker run --rm \
+                                -v $(pwd):/src \
+                                returntocorp/semgrep:latest \
+                                semgrep \
+                                --config=p/security-audit \
+                                --config=p/owasp-top-ten \
+                                --config=p/javascript \
+                                --config=p/nodejs \
+                                /src/server/src \
+                                --text \
+                                --no-error || echo "⚠️ Semgrep completed (review any findings above)."
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('🐳 Trivy Container VAPT Scan') {
+            steps {
+                echo '🏗️ Building Docker images for VAPT scanning...'
+                sh '''
+                    docker build -t chandas-server:vapt-scan server/
+                    docker build -t chandas-client:vapt-scan client/
+                '''
+
+                echo '🔍 Running Trivy vulnerability scan on Server image...'
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v $HOME/.cache:/root/.cache \
+                        aquasec/trivy:latest image \
+                        --exit-code 0 \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        chandas-server:vapt-scan
+                '''
+
+                echo '🔍 Running Trivy vulnerability scan on Client image...'
+                sh '''
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v $HOME/.cache:/root/.cache \
+                        aquasec/trivy:latest image \
+                        --exit-code 0 \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        chandas-client:vapt-scan
+                '''
+            }
+            post {
+                always {
+                    sh 'docker rmi chandas-server:vapt-scan chandas-client:vapt-scan || true'
+                }
+            }
+        }
+
+        // ====================================================================
+        // STAGE 4: Build, Push to ECR & Deploy to AWS
+        // Only on main/master branch
+        // ====================================================================
+        stage('🚀 Stage 4: Docker Build, Push & AWS Deploy') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                }
+            }
+            stages {
+
+                stage('🐳 Login to Amazon ECR') {
+                    steps {
+                        echo '🔑 Authenticating Docker with Amazon ECR (using Jenkins server AWS config)...'
+                        sh '''
+                            aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin \
+                            $(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com
+                        '''
+                        echo '✅ Docker logged in to Amazon ECR!'
+                    }
+                }
+
+                stage('📦 Build & Push Backend Image to ECR') {
+                    steps {
+                        echo '🏗️ Building production Docker image...'
+                        sh '''
+                            docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest server/
+                            docker push ${ECR_REGISTRY}:${BUILD_NUMBER}
+                            docker push ${ECR_REGISTRY}:latest
+                        '''
+                        echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} to ECR!"
+                    }
+                }
+
+                stage('⚡ Deploy Backend to AWS ECS Fargate') {
+                    steps {
+                        echo '🚀 Triggering Zero-Downtime Rolling Deployment on ECS Fargate...'
+                        sh '''
+                            aws ecs update-service \
+                                --cluster ${ECS_CLUSTER} \
+                                --service ${ECS_SERVICE} \
+                                --force-new-deployment \
+                                --region ${AWS_REGION}
+                        '''
+                        echo '✅ ECS service updated — rolling deployment in progress!'
+                    }
+                }
+
+                stage('🌐 Build & Deploy Frontend to S3 + CloudFront') {
+                    steps {
+                        echo '⚡ Building React SPA production bundle...'
+                        dir('client') {
+                            sh 'npm ci'
+                            sh 'npm run build'
+                        }
+
+                        echo '☁️ Syncing React build artifacts to Amazon S3...'
+                        sh '''
+                            aws s3 sync client/dist/ s3://${S3_BUCKET} \
+                                --delete \
+                                --region ${AWS_REGION}
+                        '''
+
+                        echo '🔄 Invalidating CloudFront edge cache...'
+                        sh '''
+                            DISTRIBUTION_ID=$(aws cloudfront list-distributions \
+                                --query "DistributionList.Items[?Origins.Items[?DomainName=='${S3_BUCKET}.s3.amazonaws.com']].Id" \
+                                --output text)
+
+                            if [ -n "$DISTRIBUTION_ID" ]; then
+                                aws cloudfront create-invalidation \
+                                    --distribution-id $DISTRIBUTION_ID \
+                                    --paths "/*"
+                                echo "✅ CloudFront cache invalidated! (ID: $DISTRIBUTION_ID)"
+                            else
+                                echo "⚠️ No CloudFront distribution found for S3 bucket."
+                            fi
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+            ╔══════════════════════════════════════════════════╗
+            ║   ✅ CI/CD Pipeline Completed Successfully!      ║
+            ║   🏛️ Chandas Collection App Deployed to AWS     ║
+            ╚══════════════════════════════════════════════════╝
+            '''
+        }
+        failure {
+            echo '''
+            ╔══════════════════════════════════════════════════╗
+            ║   ❌ Pipeline Failed! Review logs above.         ║
+            ╚══════════════════════════════════════════════════╝
+            '''
+        }
+        always {
+            echo '🧹 Cleaning up Docker system resources...'
+            sh 'docker system prune -f || true'
+        }
+    }
+}

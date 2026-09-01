@@ -1,7 +1,7 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 
-const BASE_URL = process.env.TEST_API_URL || 'http://localhost:5000';
+const BASE_URL = process.env.TEST_API_URL || 'http://localhost:5173';
 let authToken = '';
 let testRecordId = null;
 
@@ -249,7 +249,7 @@ describe('Vinayaka Chavithi Chandas Collection API Test Suite', () => {
       assert.ok(logs.length >= 3, 'Should have at least INSERT, UPDATE, and DELETE logs');
 
       // Verify that our testRecordId had all 3 actions logged automatically by the trigger
-      const testLogs = logs.filter(l => l.collection_id === testRecordId);
+      const testLogs = logs.filter(l => (l.entity_id === testRecordId) || (l.collection_id === testRecordId) || (l.new_data?.id === testRecordId) || (l.old_data?.id === testRecordId));
       const actions = testLogs.map(l => l.action_type);
 
       assert.ok(actions.includes('INSERT'), 'Audit logs must contain INSERT action from trigger');
@@ -537,6 +537,72 @@ describe('Vinayaka Chavithi Chandas Collection API Test Suite', () => {
       assert.equal(stats.total, 7500);
       assert.equal(stats.count, 2);
     });
+
+    test('Allow same collector username across different societies', async () => {
+      const sharedCollectorName = `SharedCollector_${Date.now()}`;
+
+      // Create collector in Admin 1 space
+      const res1 = await fetch(`${BASE_URL}/api/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          username: sharedCollectorName,
+          password: 'Pass1@123',
+        }),
+      });
+      assert.equal(res1.status, 201, 'Should allow collector creation in Society 1');
+
+      // Create collector with SAME username in Admin 2 space
+      const res2 = await fetch(`${BASE_URL}/api/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${admin2Token}`,
+        },
+        body: JSON.stringify({
+          username: sharedCollectorName,
+          password: 'Pass2@123',
+        }),
+      });
+      assert.equal(res2.status, 201, 'Should allow same collector username in Society 2');
+
+      // Reject duplicate in SAME space
+      const res3 = await fetch(`${BASE_URL}/api/users`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${admin2Token}`,
+        },
+        body: JSON.stringify({
+          username: sharedCollectorName,
+          password: 'Pass3@123',
+        }),
+      });
+      assert.equal(res3.status, 409, 'Should reject duplicate collector username in SAME society');
+    });
+
+    test('Registration with City & State', async () => {
+      const res = await fetch(`${BASE_URL}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: `TirupatiAdmin_${Date.now()}`,
+          password: 'Password@123',
+          society_name: 'Balaji Colony',
+          city: 'Tirupati',
+          state: 'Andhra Pradesh',
+        }),
+      });
+
+      assert.equal(res.status, 201);
+      const data = await res.json();
+      assert.equal(data.city, 'Tirupati');
+      assert.equal(data.state, 'Andhra Pradesh');
+    });
   });
 
 });
+

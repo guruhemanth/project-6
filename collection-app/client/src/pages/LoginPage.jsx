@@ -1,15 +1,16 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogIn, UserPlus, Eye, EyeOff, ShieldCheck, Sparkles, Building2, AlertCircle } from 'lucide-react';
+import { LogIn, UserPlus, Eye, EyeOff, ShieldCheck, Sparkles, Building2, AlertCircle, MapPin } from 'lucide-react';
 import api from '../services/api';
 import useCollectionStore from '../store/useCollectionStore';
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { login } = useCollectionStore();
+  // Standardized Store Usage: Destructure setAuth directly from the hook
+  const { setAuth } = useCollectionStore();
 
   const [mode, setMode] = useState('login'); // 'login' | 'register'
-  const [form, setForm] = useState({ username: '', password: '', society_name: '' });
+  const [form, setForm] = useState({ username: '', password: '', society_name: '', city: '', state: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -55,7 +56,7 @@ export default function LoginPage() {
           username: form.username.trim(),
           password: form.password,
         });
-        login(data.token, data.username, data.role, data.adminId, data.societyName);
+        setAuth(data.token, data.username, data.role, data.adminId, data.societyName, data.city, data.state);
         navigate('/', { replace: true });
       } else {
         // Register mode: Creates a new Admin with their own collection space
@@ -63,12 +64,19 @@ export default function LoginPage() {
           username: form.username.trim(),
           password: form.password,
           society_name: form.society_name.trim() || `${form.username.trim()} Society`,
+          city: form.city.trim(),
+          state: form.state.trim(),
         });
-        login(data.token, data.username, data.role, data.adminId, data.societyName);
+        setAuth(data.token, data.username, data.role, data.adminId, data.societyName, data.city, data.state);
         navigate('/', { replace: true });
       }
     } catch (err) {
-      const serverMsg = err.response?.data?.error;
+      // Robust Error Parsing: safely check for multiple possible error response formats
+      const serverMsg =
+        err.response?.data?.error ||
+        err.response?.data?.message ||
+        (typeof err.response?.data === 'string' ? err.response.data : null);
+
       if (err.response?.status === 401) {
         setError('Invalid username or password. Please check your credentials and try again.');
       } else {
@@ -147,32 +155,69 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Form */}
+          {/* Form with a11y label associations */}
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Society / Space Name (Only in Register Mode) */}
             {mode === 'register' && (
-              <div className="animate-in">
-                <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1">
-                  <Building2 size={13} className="text-orange-500" />
-                  <span>Society / Pandal Name</span>
-                </label>
-                <input
-                  type="text"
-                  name="society_name"
-                  value={form.society_name}
-                  onChange={handleChange}
-                  className="input-field !py-2.5 text-sm"
-                  placeholder="e.g. SaiNagar Colony / GovindaNagar"
-                  autoFocus
-                />
+              <div className="space-y-3 animate-in">
+                <div>
+                  <label htmlFor="login-society-name" className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                    <Building2 size={13} className="text-orange-500" />
+                    <span>Society / Pandal Name</span>
+                  </label>
+                  <input
+                    id="login-society-name"
+                    type="text"
+                    name="society_name"
+                    value={form.society_name}
+                    onChange={handleChange}
+                    className="input-field !py-2.5 text-sm"
+                    placeholder="e.g. SaiNagar Colony / GovindaNagar"
+                    autoFocus
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label htmlFor="login-city" className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                      <MapPin size={13} className="text-orange-500" />
+                      <span>City / Town</span>
+                    </label>
+                    <input
+                      id="login-city"
+                      type="text"
+                      name="city"
+                      value={form.city}
+                      onChange={handleChange}
+                      className="input-field !py-2.5 text-sm"
+                      placeholder="e.g. Tirupati"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="login-state" className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+                      <MapPin size={13} className="text-orange-500" />
+                      <span>State</span>
+                    </label>
+                    <input
+                      id="login-state"
+                      type="text"
+                      name="state"
+                      value={form.state}
+                      onChange={handleChange}
+                      className="input-field !py-2.5 text-sm"
+                      placeholder="e.g. Andhra Pradesh"
+                    />
+                  </div>
+                </div>
               </div>
             )}
 
             <div>
-              <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5">
+              <label htmlFor="login-username" className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5">
                 {mode === 'register' ? 'Admin Username' : 'Username'}
               </label>
               <input
+                id="login-username"
                 type="text"
                 name="username"
                 value={form.username}
@@ -185,11 +230,12 @@ export default function LoginPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5">
+              <label htmlFor="login-password" className="block text-xs font-semibold text-gray-700 uppercase tracking-wider mb-1.5">
                 Password
               </label>
               <div className="relative">
                 <input
+                  id="login-password"
                   type={showPassword ? 'text' : 'password'}
                   name="password"
                   value={form.password}
@@ -201,6 +247,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}

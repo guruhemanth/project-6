@@ -32,8 +32,8 @@ export async function login(req, res) {
     }
 
     const result = await pool.query(
-      `SELECT u.id, u.username, u.password_hash, u.role, u.admin_id, u.society_name,
-              p.society_name as parent_society_name
+      `SELECT u.id, u.username, u.password_hash, u.role, u.admin_id, u.society_name, u.city, u.state,
+              p.society_name as parent_society_name, p.city as parent_city, p.state as parent_state
        FROM users u
        LEFT JOIN users p ON u.admin_id = p.id
        WHERE LOWER(u.username) = LOWER($1)`,
@@ -44,12 +44,21 @@ export async function login(req, res) {
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
 
-    const user = result.rows[0];
+    // Find the user whose password matches among matches (in case multiple collectors across societies share username)
+    let authenticatedUser = null;
+    for (const candidate of result.rows) {
+      const isMatch = await bcrypt.compare(password, candidate.password_hash);
+      if (isMatch) {
+        authenticatedUser = candidate;
+        break;
+      }
+    }
 
-    const isMatch = await bcrypt.compare(password, user.password_hash);
-    if (!isMatch) {
+    if (!authenticatedUser) {
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
+
+    const user = authenticatedUser;
 
     // Resolve adminId: Admins own their space (their ID), collectors belong to their parent admin
     const adminId = user.role === 'admin' ? user.id : (user.admin_id || user.id);
@@ -64,6 +73,8 @@ export async function login(req, res) {
       role: user.role,
       adminId,
       societyName,
+      city: user.city || user.parent_city || '',
+      state: user.state || user.parent_state || '',
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -77,7 +88,7 @@ export async function login(req, res) {
  */
 export async function register(req, res) {
   try {
-    const { username, password, society_name } = req.body;
+    const { username, password, society_name, city, state } = req.body;
 
     if (!username || !password) {
       return res.status(400).json({ error: 'Username and password are required.' });
@@ -93,25 +104,27 @@ export async function register(req, res) {
     }
 
     const cleanSociety = society_name && society_name.trim() ? society_name.trim() : `${cleanUsername} Society`;
+    const cleanCity = city && city.trim() ? city.trim() : '';
+    const cleanState = state && state.trim() ? state.trim() : '';
 
-    // Check for duplicate username
+    // Check for duplicate admin username
     const existing = await pool.query(
-      'SELECT id FROM users WHERE LOWER(username) = LOWER($1)',
-      [cleanUsername]
+      'SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND role = $2',
+      [cleanUsername, 'admin']
     );
 
     if (existing.rows.length > 0) {
-      return res.status(409).json({ error: `Username "${cleanUsername}" is already registered. Please choose another.` });
+      return res.status(409).json({ error: `Admin username "${cleanUsername}" is already registered. Please choose another.` });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Register as Admin of a new independent collection space
     const result = await pool.query(
-      `INSERT INTO users (username, password_hash, role, society_name)
-       VALUES ($1, $2, 'admin', $3)
-       RETURNING id, username, role, society_name, created_at`,
-      [cleanUsername, passwordHash, cleanSociety]
+      `INSERT INTO users (username, password_hash, role, society_name, city, state)
+       VALUES ($1, $2, 'admin', $3, $4, $5)
+       RETURNING id, username, role, society_name, city, state, created_at`,
+      [cleanUsername, passwordHash, cleanSociety, cleanCity, cleanState]
     );
 
     const user = result.rows[0];
@@ -126,6 +139,8 @@ export async function register(req, res) {
       role: user.role,
       adminId,
       societyName: user.society_name,
+      city: user.city,
+      state: user.state,
       message: `Admin account & collection space for "${user.society_name}" created successfully!`,
     });
   } catch (err) {
@@ -143,7 +158,7 @@ export async function getUsers(req, res) {
     const adminId = req.user.adminId;
 
     const result = await pool.query(
-      `SELECT id, username, role, society_name, created_at
+      `SELECT id, username, role, society_name, city, state, created_at
        FROM users
        WHERE id = $1 OR admin_id = $1
        ORDER BY id ASC`,
@@ -182,19 +197,20 @@ export async function createUser(req, res) {
       return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
     }
 
-    // Check duplicate username
-    const existing = await pool.query(
-      'SELECT id FROM users WHERE LOWER(username) = LOWER($1)',
-      [cleanUsername]
+    const adminId = req.user.id;
+    const societyName = req.user.societyName || 'GovindaNagar';
+
+    // Check duplicate username ONLY within the same society (admin space) or matching admin
+    const existingInSpace = await pool.query(
+      'SELECT id FROM users WHERE LOWER(username) = LOWER($1) AND (admin_id = $2 OR id = $2)',
+      [cleanUsername, adminId]
     );
 
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ error: `Username "${cleanUsername}" is already taken.` });
+    if (existingInSpace.rows.length > 0) {
+      return res.status(409).json({ error: `Username "${cleanUsername}" is already taken in this society. Please choose another username.` });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const adminId = req.user.id;
-    const societyName = req.user.societyName || 'GovindaNagar';
 
     const result = await pool.query(
       `INSERT INTO users (username, password_hash, role, admin_id, society_name)

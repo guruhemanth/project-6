@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Search, Pencil, Trash2, IndianRupee, Table2, SlidersHorizontal, X, ArrowUpDown, RotateCcw } from 'lucide-react';
+import { Search, Pencil, Trash2, IndianRupee, Table2, SlidersHorizontal, X, ArrowUpDown, RotateCcw, MessageSquare } from 'lucide-react';
 import useCollectionStore from '../store/useCollectionStore';
 import EditModal from '../components/EditModal';
 import DeleteModal from '../components/DeleteModal';
+import { sendWhatsAppReceipt } from '../utils/whatsappReceipt';
 
 const PRESET_AMOUNTS = [
   { label: 'All', min: '', max: '' },
@@ -13,7 +14,7 @@ const PRESET_AMOUNTS = [
 ];
 
 export default function RecordsPage() {
-  const { records, loading, searchQuery, setSearchQuery, fetchRecords } = useCollectionStore();
+  const { records, loading, searchQuery, societyName, city, username, setSearchQuery, fetchRecords } = useCollectionStore();
 
   const [editRecord, setEditRecord] = useState(null);
   const [deleteRecord, setDeleteRecord] = useState(null);
@@ -61,7 +62,8 @@ export default function RecordsPage() {
 
   // Calculate sum of currently displayed records
   const currentViewTotal = useMemo(() => {
-    return records.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
+    const safeRecords = Array.isArray(records) ? records : [];
+    return safeRecords.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0);
   }, [records]);
 
   return (
@@ -291,6 +293,24 @@ export default function RecordsPage() {
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() =>
+                            sendWhatsAppReceipt({
+                              phoneNumber: record.phone_number,
+                              donorName: record.name,
+                              doorNumber: record.door_number,
+                              amount: record.amount,
+                              receiptId: record.id,
+                              societyName,
+                              city,
+                              collectorName: record.collector_name || username,
+                            })
+                          }
+                          className="p-1.5 rounded-lg hover:bg-emerald-50 text-emerald-600 hover:text-emerald-700 transition-colors"
+                          title="Send WhatsApp Receipt"
+                        >
+                          <MessageSquare size={16} />
+                        </button>
                         <button
                           onClick={() => setEditRecord(record)}
                           className="p-1.5 rounded-lg hover:bg-blue-50 text-blue-500 hover:text-blue-600 transition-colors"

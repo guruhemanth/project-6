@@ -10,7 +10,7 @@ dotenv.config({ override: true });
 const { Pool } = pg;
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/collection_db',
 });
 
 pool.on('error', (err) => {
@@ -76,7 +76,7 @@ export async function initDatabase() {
     const triggerCheck = await pool.query(`
       SELECT trigger_name 
       FROM information_schema.triggers 
-      WHERE event_object_table = 'collections' AND trigger_name = 'collection_audit_trigger'
+      WHERE event_object_table = 'collections' AND trigger_name IN ('trg_collection_audit', 'collection_audit_trigger')
     `);
 
     const hasUsers = existingTables.includes('users');
@@ -102,7 +102,7 @@ export async function initDatabase() {
     console.log(`   👥 Table "users": OK (${users_count} users with hashed passwords)`);
     console.log(`   📁 Table "collections": OK (${collections_count} records preserved)`);
     console.log(`   📁 Table "collection_logs": OK (${logs_count} audit logs preserved)`);
-    console.log(`   ⚙️  Trigger "collection_audit_trigger": ACTIVE`);
+    console.log(`   ⚙️  Trigger "trg_collection_audit": ACTIVE`);
   } catch (err) {
     console.error('❌ Database initialization/verification failed:', err.message);
     throw err;

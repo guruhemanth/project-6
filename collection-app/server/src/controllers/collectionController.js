@@ -1,203 +1,253 @@
-import pool from '../config/db.js';
+import { withTenantContext } from '../config/rlsDb.js';
+import { broadcastDelta } from '../utils/realtime.js';
 
-/**
- * Helper: queries fresh aggregate stats scoped to a specific admin's collection space.
- * Returns { total: number, count: number }
- */
-async function getFreshStats(adminId) {
-  const result = await pool.query(
-    'SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM collections WHERE admin_id = $1',
-    [adminId]
-  );
-  return {
-    total: parseFloat(result.rows[0].total),
-    count: parseInt(result.rows[0].count),
-  };
+// ── GET /api/records ──
+export async function getCollections(req, res) {
+  try {
+    const { search, q, sort = 'created_at', sortBy, order = 'desc', sortOrder, minAmount, maxAmount, page, limit } = req.query;
+    const searchTerm = (q || search || '').trim();
+    const effectiveSort = sortBy || sort || 'created_at';
+    const effectiveOrder = (sortOrder || order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const result = await withTenantContext(req, async (client) => {
+      let query = 'SELECT * FROM collections WHERE admin_id = $1';
+      const params = [req.user.adminId];
+
+      if (searchTerm) {
+        params.push(`%${searchTerm}%`);
+        query += ` AND (name ILIKE $${params.length} OR door_number ILIKE $${params.length} OR collector_name ILIKE $${params.length})`;
+      }
+
+      if (minAmount !== undefined && minAmount !== '') {
+        const minVal = parseFloat(minAmount);
+        if (!isNaN(minVal)) {
+          params.push(minVal);
+          query += ` AND amount >= $${params.length}`;
+        }
+      }
+
+      if (maxAmount !== undefined && maxAmount !== '') {
+        const maxVal = parseFloat(maxAmount);
+        if (!isNaN(maxVal)) {
+          params.push(maxVal);
+          query += ` AND amount <= $${params.length}`;
+        }
+      }
+
+      const allowedSorts = ['created_at', 'amount', 'name', 'door_number'];
+      const sortCol = allowedSorts.includes(effectiveSort) ? effectiveSort : 'created_at';
+      query += ` ORDER BY ${sortCol} ${effectiveOrder}`;
+
+      // Pagination only if specified
+      if (page || limit) {
+        const safeLimit = Math.min(100, Math.max(1, parseInt(limit || 50)));
+        const offset = (Math.max(1, parseInt(page || 1)) - 1) * safeLimit;
+        query += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+        params.push(safeLimit, offset);
+      }
+
+      const recordsRes = await client.query(query, params);
+
+      // Return raw array if no pagination params were provided (backward test compatibility)
+      if (!page && !limit) {
+        return recordsRes.rows;
+      }
+
+      // Count query for pagination response
+      let countQuery = 'SELECT COUNT(*) as total_count FROM collections WHERE admin_id = $1';
+      const countParams = [req.user.adminId];
+      if (searchTerm) {
+        countParams.push(`%${searchTerm}%`);
+        countQuery += ` AND (name ILIKE $${countParams.length} OR door_number ILIKE $${countParams.length} OR collector_name ILIKE $${countParams.length})`;
+      }
+      const countRes = await client.query(countQuery, countParams);
+
+      return {
+        records: recordsRes.rows,
+        total: parseInt(countRes.rows[0].total_count),
+        page: parseInt(page || 1),
+        limit: Math.min(100, Math.max(1, parseInt(limit || 50))),
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('getCollections error:', err);
+    res.status(500).json({ error: 'Failed to retrieve collections.' });
+  }
 }
 
-/**
- * GET /api/stats/total
- * Returns { total, count } aggregate stats for the user's collection space.
- */
+// ── GET /api/records/stats ──
 export async function getStats(req, res) {
   try {
-    const adminId = req.user.adminId;
-    const stats = await getFreshStats(adminId);
-    return res.json(stats);
+    const stats = await withTenantContext(req, async (client) => {
+      const result = await client.query(
+        `SELECT 
+           COALESCE(SUM(amount), 0) AS total_amount,
+           COUNT(*) AS total_count,
+           COALESCE(MAX(amount), 0) AS max_amount,
+           COALESCE(AVG(amount), 0) AS avg_amount
+         FROM collections 
+         WHERE admin_id = $1`,
+        [req.user.adminId]
+      );
+      return result.rows[0];
+    });
+
+    res.json({
+      total: parseFloat(stats.total_amount),
+      count: parseInt(stats.total_count),
+      max: parseFloat(stats.max_amount),
+      avg: parseFloat(stats.avg_amount),
+    });
   } catch (err) {
     console.error('getStats error:', err);
-    return res.status(500).json({ error: 'Failed to fetch stats.' });
+    res.status(500).json({ error: 'Failed to retrieve statistics.' });
   }
 }
 
-/**
- * GET /api/records?q=&minAmount=&maxAmount=&sortBy=&sortOrder=
- * Returns collections scoped to the user's admin collection space.
- */
-export async function getRecords(req, res) {
+// ── POST /api/records ──
+export async function createCollection(req, res) {
   try {
-    const adminId = req.user.adminId;
-    const { q, minAmount, maxAmount, sortBy = 'created_at', sortOrder = 'DESC' } = req.query;
-
-    const conditions = ['admin_id = $1'];
-    const params = [adminId];
-
-    if (q && q.trim()) {
-      params.push(`%${q.trim()}%`);
-      conditions.push(`(name ILIKE $${params.length} OR door_number ILIKE $${params.length})`);
-    }
-
-    if (minAmount && !isNaN(parseFloat(minAmount))) {
-      params.push(parseFloat(minAmount));
-      conditions.push(`amount >= $${params.length}`);
-    }
-
-    if (maxAmount && !isNaN(parseFloat(maxAmount))) {
-      params.push(parseFloat(maxAmount));
-      conditions.push(`amount <= $${params.length}`);
-    }
-
-    const whereClause = `WHERE ${conditions.join(' AND ')}`;
-
-    const allowedSortColumns = {
-      created_at: 'created_at',
-      amount: 'amount',
-      name: 'name',
-      door_number: 'door_number',
-    };
-    const sortColumn = allowedSortColumns[sortBy] || 'created_at';
-    const direction = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
-
-    const query = `
-      SELECT * FROM collections
-      ${whereClause}
-      ORDER BY ${sortColumn} ${direction}
-    `;
-
-    const result = await pool.query(query, params);
-    return res.json(result.rows);
-  } catch (err) {
-    console.error('getRecords error:', err);
-    return res.status(500).json({ error: 'Failed to fetch records.' });
-  }
-}
-
-/**
- * POST /api/records
- * Creates a new collection entry inside the user's admin space. Emits COLLECTION_MUTATED.
- */
-export async function createRecord(req, res) {
-  try {
-    const adminId = req.user.adminId;
-    const collectorName = req.user.username;
-    const { name, door_number, amount } = req.body;
+    const { name, door_number, amount, phone_number, idempotency_key } = req.body;
 
     if (!name || !door_number || amount === undefined || amount === null) {
-      return res.status(400).json({ error: 'name, door_number, and amount are required.' });
+      return res.status(400).json({ error: 'Name, door number, and amount are required.' });
     }
 
-    const parsedAmount = parseFloat(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      return res.status(400).json({ error: 'amount must be a positive number.' });
+    const numAmount = parseFloat(amount);
+    if (isNaN(numAmount) || numAmount < 0) {
+      return res.status(400).json({ error: 'Amount must be a non-negative number.' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO collections (admin_id, collector_name, name, door_number, amount)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [adminId, collectorName, name.trim(), door_number.trim(), parsedAmount]
-    );
+    const newRecord = await withTenantContext(req, async (client) => {
+      // Idempotency deduplication check
+      if (idempotency_key) {
+        const existing = await client.query(
+          'SELECT * FROM collections WHERE idempotency_key = $1 AND admin_id = $2',
+          [idempotency_key, req.user.adminId]
+        );
+        if (existing.rows.length > 0) {
+          return existing.rows[0];
+        }
+      }
 
-    const record = result.rows[0];
-    const stats = await getFreshStats(adminId);
+      const result = await client.query(
+        `INSERT INTO collections (admin_id, collector_id, collector_name, name, door_number, phone_number, amount, idempotency_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          req.user.adminId,
+          req.user.id,
+          req.user.username,
+          name.trim(),
+          door_number.trim(),
+          phone_number ? phone_number.trim() : null,
+          numAmount,
+          idempotency_key || null,
+        ]
+      );
+      return result.rows[0];
+    });
 
+    // Real-Time Delta Emission
     const io = req.app.get('io');
-    if (io) {
-      io.to(`space_${adminId}`).emit('COLLECTION_MUTATED', { action: 'INSERT', stats, record, adminId });
-      io.emit('COLLECTION_MUTATED', { action: 'INSERT', stats, record, adminId });
-    }
+    broadcastDelta(io, req.user.adminId, 'COLLECTION_MUTATED', {
+      action: 'INSERT',
+      record: newRecord,
+      amountDelta: parseFloat(newRecord.amount),
+    });
 
-    return res.status(201).json(record);
+    res.status(201).json(newRecord);
   } catch (err) {
-    console.error('createRecord error:', err);
-    return res.status(500).json({ error: 'Failed to create record.' });
+    console.error('createCollection error:', err);
+    res.status(500).json({ error: 'Failed to create collection record.' });
   }
 }
 
-/**
- * PUT /api/records/:id
- * Updates a collection entry within the user's admin space.
- */
-export async function updateRecord(req, res) {
+// ── PUT /api/records/:id ──
+export async function updateCollection(req, res) {
   try {
-    const adminId = req.user.adminId;
     const { id } = req.params;
-    const { name, door_number, amount } = req.body;
+    const { name, door_number, amount, phone_number } = req.body;
 
     if (!name || !door_number || amount === undefined || amount === null) {
-      return res.status(400).json({ error: 'name, door_number, and amount are required.' });
+      return res.status(400).json({ error: 'Name, door number, and amount are required.' });
     }
 
-    const parsedAmount = parseFloat(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      return res.status(400).json({ error: 'amount must be a positive number.' });
+    const numAmount = parseFloat(amount);
+    if (isNaN(numAmount) || numAmount < 0) {
+      return res.status(400).json({ error: 'Amount must be a non-negative number.' });
     }
 
-    const result = await pool.query(
-      `UPDATE collections SET name = $1, door_number = $2, amount = $3
-       WHERE id = $4 AND admin_id = $5 RETURNING *`,
-      [name.trim(), door_number.trim(), parsedAmount, id, adminId]
-    );
+    const updateResult = await withTenantContext(req, async (client) => {
+      // Get old amount for delta calculation
+      const oldRes = await client.query(
+        'SELECT * FROM collections WHERE id = $1 AND admin_id = $2',
+        [id, req.user.adminId]
+      );
+      if (oldRes.rows.length === 0) return null;
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Record not found in your collection space.' });
+      const oldRecord = oldRes.rows[0];
+      const result = await client.query(
+        `UPDATE collections 
+         SET name = $1, door_number = $2, amount = $3, phone_number = $4, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 AND admin_id = $6
+         RETURNING *`,
+        [name.trim(), door_number.trim(), numAmount, phone_number ? phone_number.trim() : null, id, req.user.adminId]
+      );
+
+      return {
+        updated: result.rows[0],
+        amountDelta: numAmount - parseFloat(oldRecord.amount),
+      };
+    });
+
+    if (!updateResult) {
+      return res.status(404).json({ error: 'Record not found.' });
     }
-
-    const record = result.rows[0];
-    const stats = await getFreshStats(adminId);
 
     const io = req.app.get('io');
-    if (io) {
-      io.to(`space_${adminId}`).emit('COLLECTION_MUTATED', { action: 'UPDATE', stats, record, adminId });
-      io.emit('COLLECTION_MUTATED', { action: 'UPDATE', stats, record, adminId });
-    }
+    broadcastDelta(io, req.user.adminId, 'COLLECTION_MUTATED', {
+      action: 'UPDATE',
+      record: updateResult.updated,
+      amountDelta: updateResult.amountDelta,
+    });
 
-    return res.json(record);
+    res.json(updateResult.updated);
   } catch (err) {
-    console.error('updateRecord error:', err);
-    return res.status(500).json({ error: 'Failed to update record.' });
+    console.error('updateCollection error:', err);
+    res.status(500).json({ error: 'Failed to update collection record.' });
   }
 }
 
-/**
- * DELETE /api/records/:id
- * Deletes a collection entry within the user's admin space.
- */
-export async function deleteRecord(req, res) {
+// ── DELETE /api/records/:id ──
+export async function deleteCollection(req, res) {
   try {
-    const adminId = req.user.adminId;
     const { id } = req.params;
 
-    const result = await pool.query(
-      'DELETE FROM collections WHERE id = $1 AND admin_id = $2 RETURNING *',
-      [id, adminId]
-    );
+    const deleted = await withTenantContext(req, async (client) => {
+      const result = await client.query(
+        'DELETE FROM collections WHERE id = $1 AND admin_id = $2 RETURNING *',
+        [id, req.user.adminId]
+      );
+      return result.rows[0];
+    });
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Record not found in your collection space.' });
+    if (!deleted) {
+      return res.status(404).json({ error: 'Record not found.' });
     }
-
-    const record = result.rows[0];
-    const stats = await getFreshStats(adminId);
 
     const io = req.app.get('io');
-    if (io) {
-      io.to(`space_${adminId}`).emit('COLLECTION_MUTATED', { action: 'DELETE', stats, record, adminId });
-      io.emit('COLLECTION_MUTATED', { action: 'DELETE', stats, record, adminId });
-    }
+    broadcastDelta(io, req.user.adminId, 'COLLECTION_MUTATED', {
+      action: 'DELETE',
+      record: deleted,
+      amountDelta: -parseFloat(deleted.amount),
+    });
 
-    return res.json({ message: 'Record deleted successfully.', record });
+    res.json({ message: 'Record deleted successfully.', record: deleted });
   } catch (err) {
-    console.error('deleteRecord error:', err);
-    return res.status(500).json({ error: 'Failed to delete record.' });
+    console.error('deleteCollection error:', err);
+    res.status(500).json({ error: 'Failed to delete collection record.' });
   }
 }

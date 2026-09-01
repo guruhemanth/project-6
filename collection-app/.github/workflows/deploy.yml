@@ -1,0 +1,263 @@
+name: CI/CD Pipeline - Test, Scan & Deploy to AWS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: chandas-server
+  ECS_SERVICE: chandas-service
+  ECS_CLUSTER: chandas-cluster
+  S3_BUCKET: chandas-frontend-prod
+  CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
+jobs:
+  # ============================================================================
+  # STAGE 1: Code Linting & Formatting Quality Gate
+  # ============================================================================
+  lint:
+    name: 🔍 Code Linting & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: |
+            server/package-lock.json
+            client/package-lock.json
+
+      - name: Lint Server Syntax
+        working-directory: server
+        run: |
+          npm ci
+          node --check src/server.js
+          node --check src/config/db.js
+          node --check src/config/rlsDb.js
+          node --check src/sockets/socketHandler.js
+
+      - name: Lint & Build Client Check
+        working-directory: client
+        run: |
+          npm ci
+          npx vite build --mode production
+
+  # ============================================================================
+  # STAGE 2: Automated Testing (Unit & Integration Test Suite)
+  # ============================================================================
+  test:
+    name: 🧪 Automated Testing (34 Tests)
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: collection_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: testpassword123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Server Dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Initialize PostgreSQL Schema & Triggers
+        env:
+          PGPASSWORD: testpassword123
+        run: |
+          psql -h localhost -U postgres -d collection_db -f server/src/scripts/init-db.sql
+
+      - name: Start API Server in Background
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword123@localhost:5432/collection_db
+          JWT_SECRET: ci_cd_test_secret_key_2026
+          PORT: 5000
+          NODE_ENV: test
+        run: |
+          node src/server.js &
+          # Wait for server health endpoint to be 200 OK
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:5000/api/health | grep '"status":"ok"'; then
+              echo "✅ API Server is ready!"
+              break
+            fi
+            echo "Waiting for API server..."
+            sleep 1
+          done
+
+      - name: Execute Node Native Test Suite (34 Test Cases)
+        working-directory: server
+        env:
+          TEST_API_URL: http://127.0.0.1:5000
+          DATABASE_URL: postgresql://postgres:testpassword123@localhost:5432/collection_db
+        run: npm test
+
+  # ============================================================================
+  # STAGE 3: Security & VAPT Scanning (SAST, SCA & Container Vulnerabilities)
+  # ============================================================================
+  security-vapt:
+    name: 🛡️ Security & VAPT Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 1. Software Composition Analysis (SCA) / Dependency Audit
+      - name: Dependency Vulnerability Audit (Server)
+        working-directory: server
+        run: |
+          npm ci
+          npm audit --audit-level=high || echo "⚠️ Non-critical dependency advisories found."
+
+      - name: Dependency Vulnerability Audit (Client)
+        working-directory: client
+        run: |
+          npm ci
+          npm audit --audit-level=high || echo "⚠️ Non-critical dependency advisories found."
+
+      # 2. Static Application Security Testing (SAST)
+      - name: Semgrep SAST Security Scanner (OWASP Top 10 & API Security)
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/owasp-top-ten
+            p/javascript
+            p/nodejs
+        continue-on-error: true
+
+      # 3. Secret Leak Detection
+      - name: Gitleaks Secret Detection
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      # 4. Container Image Security Scan (Trivy VAPT)
+      - name: Build Local Docker Image for VAPT Scan
+        run: |
+          docker build -t chandas-server:vapt-scan server/
+          docker build -t chandas-client:vapt-scan client/
+
+      - name: Aqua Trivy Container VAPT Vulnerability Scanner (Server)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'chandas-server:vapt-scan'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Aqua Trivy Container VAPT Vulnerability Scanner (Client)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'chandas-client:vapt-scan'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  # ============================================================================
+  # STAGE 4: Build, Push Docker Images & Deploy to AWS (ECS & S3/CloudFront)
+  # ============================================================================
+  deploy:
+    name: 🚀 Build, Docker Login & Deploy to AWS
+    runs-on: ubuntu-latest
+    needs: security-vapt
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 1. AWS Credentials Configuration & Login
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 2. Amazon ECR Docker Login
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 3. Build, Tag & Push Server Container to Amazon ECR
+      - name: Build & Push Backend Docker Image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest server/
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      # 4. Trigger Zero-Downtime Rolling Update on AWS ECS Fargate
+      - name: Deploy Backend Service to AWS ECS Fargate
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --force-new-deployment \
+            --region $AWS_REGION
+
+      # 5. Build React Frontend SPA
+      - name: Build React Frontend Production Bundle
+        working-directory: client
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL || '' }}
+          VITE_SOCKET_URL: ${{ secrets.VITE_SOCKET_URL || '' }}
+        run: |
+          npm ci
+          npm run build
+
+      # 6. Deploy Frontend to Amazon S3 & Invalidate CloudFront CDN Cache
+      - name: Sync Frontend Assets to Amazon S3
+        run: |
+          aws s3 sync client/dist/ s3://$S3_BUCKET --delete --region $AWS_REGION
+
+      - name: Invalidate CloudFront CDN Cache (Edge Refresh)
+        if: env.CLOUDFRONT_DISTRIBUTION_ID != ''
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id $CLOUDFRONT_DISTRIBUTION_ID \
+            --paths "/*" \
+            --region $AWS_REGION

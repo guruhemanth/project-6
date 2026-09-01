@@ -177,7 +177,7 @@ export default function UsersPage() {
             <div className="flex items-center justify-between pt-2 border-t border-gray-100 flex-wrap gap-2">
               <div className="flex items-center gap-1.5 text-xs text-gray-400">
                 <KeyRound size={14} className="text-orange-400" />
-                <span>Passwords are encrypted with bcrypt (10 rounds). Scoped strictly to your admin space.</span>
+                <span>Bcrypt encrypted (10 rounds). Usernames are scoped to this society (duplicates allowed across societies).</span>
               </div>
 
               <div className="flex items-center gap-2 ml-auto">
