@@ -2,12 +2,11 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION         = 'ap-south-1'
-        ECR_REPOSITORY     = 'chandas-server'
-        ECS_SERVICE        = 'chandas-service'
-        ECS_CLUSTER        = 'chandas-cluster'
-        S3_BUCKET          = 'chandas-frontend-prod'
-        ECR_REGISTRY       = "${sh(returnStdout: true, script: 'aws ecr describe-repositories --repository-names chandas-server --query "repositories[0].repositoryUri" --output text --region ap-south-1').trim()}"
+        AWS_REGION     = 'ap-south-1'
+        ECR_REPOSITORY = 'chandas-server'
+        ECS_SERVICE    = 'chandas-service'
+        ECS_CLUSTER    = 'chandas-cluster'
+        S3_BUCKET      = 'chandas-frontend-prod'
     }
 
     options {
@@ -56,6 +55,9 @@ pipeline {
             steps {
                 echo '🐘 Starting PostgreSQL test database...'
                 sh '''
+                    # Clean any dangling container first
+                    docker rm -f chandas-test-db 2>/dev/null || true
+
                     # Start a PostgreSQL 16 test container
                     docker run -d \
                         --name chandas-test-db \
@@ -67,7 +69,10 @@ pipeline {
 
                     # Wait for PostgreSQL to be ready
                     for i in $(seq 1 30); do
-                        docker exec chandas-test-db pg_isready -U postgres && break
+                        if docker exec chandas-test-db pg_isready -U postgres -d collection_db; then
+                            echo "✅ PostgreSQL is ready!"
+                            break
+                        fi
                         echo "Waiting for PostgreSQL... attempt $i"
                         sleep 1
                     done
@@ -113,8 +118,7 @@ pipeline {
                 always {
                     echo '🧹 Cleaning up test containers...'
                     sh '''
-                        docker stop chandas-test-db || true
-                        docker rm chandas-test-db || true
+                        docker rm -f chandas-test-db 2>/dev/null || true
                         pkill -f "node src/server.js" || true
                     '''
                 }
@@ -208,7 +212,7 @@ pipeline {
             }
             post {
                 always {
-                    sh 'docker rmi chandas-server:vapt-scan chandas-client:vapt-scan || true'
+                    sh 'docker rmi chandas-server:vapt-scan chandas-client:vapt-scan 2>/dev/null || true'
                 }
             }
         }
@@ -230,9 +234,9 @@ pipeline {
                     steps {
                         echo '🔑 Authenticating Docker with Amazon ECR (using Jenkins server AWS config)...'
                         sh '''
+                            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
                             aws ecr get-login-password --region ${AWS_REGION} | \
-                            docker login --username AWS --password-stdin \
-                            $(aws sts get-caller-identity --query Account --output text).dkr.ecr.${AWS_REGION}.amazonaws.com
+                            docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
                         '''
                         echo '✅ Docker logged in to Amazon ECR!'
                     }
@@ -240,13 +244,16 @@ pipeline {
 
                 stage('📦 Build & Push Backend Image to ECR') {
                     steps {
-                        echo '🏗️ Building production Docker image...'
+                        echo '🏗️ Building production Docker image and pushing to ECR...'
                         sh '''
+                            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                            ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+
                             docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest server/
                             docker push ${ECR_REGISTRY}:${BUILD_NUMBER}
                             docker push ${ECR_REGISTRY}:latest
+                            echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} to ECR!"
                         '''
-                        echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} to ECR!"
                     }
                 }
 
@@ -259,8 +266,8 @@ pipeline {
                                 --service ${ECS_SERVICE} \
                                 --force-new-deployment \
                                 --region ${AWS_REGION}
+                            echo '✅ ECS service updated — rolling deployment in progress!'
                         '''
-                        echo '✅ ECS service updated — rolling deployment in progress!'
                     }
                 }
 
@@ -283,15 +290,15 @@ pipeline {
                         sh '''
                             DISTRIBUTION_ID=$(aws cloudfront list-distributions \
                                 --query "DistributionList.Items[?Origins.Items[?DomainName=='${S3_BUCKET}.s3.amazonaws.com']].Id" \
-                                --output text)
+                                --output text 2>/dev/null || echo "")
 
-                            if [ -n "$DISTRIBUTION_ID" ]; then
+                            if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
                                 aws cloudfront create-invalidation \
-                                    --distribution-id $DISTRIBUTION_ID \
+                                    --distribution-id "$DISTRIBUTION_ID" \
                                     --paths "/*"
                                 echo "✅ CloudFront cache invalidated! (ID: $DISTRIBUTION_ID)"
                             else
-                                echo "⚠️ No CloudFront distribution found for S3 bucket."
+                                echo "ℹ️ No CloudFront distribution found matching S3 origin. Skipping cache invalidation."
                             fi
                         '''
                     }
@@ -317,8 +324,7 @@ pipeline {
             '''
         }
         always {
-            echo '🧹 Cleaning up Docker system resources...'
-            sh 'docker system prune -f || true'
+            echo '🧹 Cleaning up workspace and containers...'
         }
     }
 }
