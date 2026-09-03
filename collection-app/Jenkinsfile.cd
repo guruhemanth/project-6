@@ -46,7 +46,7 @@ pipeline {
                     ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
                     ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
 
-                    docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest server/
+                    docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest collection-app/server/
                     docker push ${ECR_REGISTRY}:${BUILD_NUMBER}
                     docker push ${ECR_REGISTRY}:latest
                     echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} and latest to ECR!"
@@ -77,14 +77,14 @@ pipeline {
         stage('🌐 Stage 4: Deploy Frontend to S3 & CloudFront') {
             steps {
                 echo '⚡ Building production React SPA bundle...'
-                dir('client') {
-                    sh 'npm ci'
+                dir('collection-app/client') {
+                    sh 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
                     sh 'npm run build'
                 }
 
                 echo '☁️ Syncing build artifacts to S3 bucket...'
                 sh '''
-                    aws s3 sync client/dist/ s3://${S3_BUCKET} \
+                    aws s3 sync collection-app/client/dist/ s3://${S3_BUCKET} \
                         --delete \
                         --region ${AWS_REGION}
                 '''

@@ -21,8 +21,8 @@ pipeline {
                 stage('Lint Server') {
                     steps {
                         echo '📦 Installing server dependencies...'
-                        dir('server') {
-                            sh 'npm ci'
+                        dir('collection-app/server') {
+                            sh 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
                             sh 'node --check src/server.js'
                             sh 'node --check src/config/db.js'
                             sh 'node --check src/config/rlsDb.js'
@@ -34,8 +34,8 @@ pipeline {
                 stage('Lint & Build Client') {
                     steps {
                         echo '📦 Installing client dependencies & building...'
-                        dir('client') {
-                            sh 'npm ci'
+                        dir('collection-app/client') {
+                            sh 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
                             sh 'npx vite build --mode production'
                             echo '✅ Client build check passed!'
                         }
@@ -78,11 +78,11 @@ pipeline {
                 sh '''
                     PGPASSWORD=testpassword123 psql \
                         -h localhost -p 5433 -U postgres -d collection_db \
-                        -f server/src/scripts/init-db.sql
+                        -f collection-app/server/src/scripts/init-db.sql
                 '''
 
                 echo '🚀 Starting API server for tests...'
-                dir('server') {
+                dir('collection-app/server') {
                     sh '''
                         DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
                         JWT_SECRET=ci_test_secret_key_jenkins \
@@ -131,7 +131,7 @@ pipeline {
                     steps {
                         echo '🔎 Running Software Composition Analysis...'
                         sh '''
-                            cd server && npm audit --audit-level=high || true
+                            cd collection-app/server && npm audit --audit-level=high || true
                             cd ../client && npm audit --audit-level=high || true
                         '''
                         echo '✅ npm audit completed.'
@@ -143,7 +143,7 @@ pipeline {
                         echo '🔐 Scanning for leaked secrets & credentials...'
                         sh '''
                             docker run --rm \
-                                -v $(pwd):/repo \
+                                -v $(pwd)/collection-app:/repo \
                                 zricethezav/gitleaks:latest \
                                 detect \
                                 --source=/repo \
@@ -158,7 +158,7 @@ pipeline {
                         echo '🔬 Running Semgrep Static Application Security Testing (OWASP Top 10)...'
                         sh '''
                             docker run --rm \
-                                -v $(pwd):/src \
+                                -v $(pwd)/collection-app:/src \
                                 returntocorp/semgrep:latest \
                                 semgrep \
                                 --config=p/security-audit \
@@ -178,8 +178,8 @@ pipeline {
             steps {
                 echo '🏗️ Building Docker images for VAPT scanning...'
                 sh '''
-                    docker build -t chandas-server:vapt-scan server/
-                    docker build -t chandas-client:vapt-scan client/
+                    docker build -t chandas-server:vapt-scan collection-app/server/
+                    docker build -t chandas-client:vapt-scan collection-app/client/
                 '''
 
                 echo '🔍 Running Trivy vulnerability scan on Server image...'
