@@ -54,13 +54,16 @@ pipeline {
                     # Clean any dangling container first
                     docker rm -f chandas-test-db 2>/dev/null || true
 
-                    # Start a PostgreSQL 16 test container
+                    # Inspect Jenkins container network so the test DB joins the exact same network
+                    JENKINS_NET=$(docker inspect jenkins --format '{{range $net, $v := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null || echo "bridge")
+
+                    # Start PostgreSQL on the same Docker network with container name as hostname
                     docker run -d \
                         --name chandas-test-db \
+                        --network "${JENKINS_NET}" \
                         -e POSTGRES_DB=collection_db \
                         -e POSTGRES_USER=postgres \
                         -e POSTGRES_PASSWORD=testpassword123 \
-                        -p 5433:5432 \
                         postgres:16-alpine
 
                     # Wait for PostgreSQL to be ready
@@ -105,7 +108,7 @@ pipeline {
                     echo '🧪 Running full integration test suite...'
                     sh '''
                         TEST_API_URL=http://127.0.0.1:5099 \
-                        DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
+                        DATABASE_URL=postgresql://postgres:testpassword123@chandas-test-db:5432/collection_db \
                         npm test
                     '''
                 }
