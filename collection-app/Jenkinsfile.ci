@@ -1,4 +1,4 @@
-pipeline {
+lpipeline {
     agent any
 
     tools {
@@ -77,7 +77,7 @@ pipeline {
                 echo '🗄️ Initializing database schema & triggers...'
                 sh '''
                     PGPASSWORD=testpassword123 psql \
-                        -h localhost -p 5433 -U postgres -d collection_db \
+                        -h localhost -p 5432 -U postgres -d collection_db \
                         -f collection-app/server/src/scripts/init-db.sql
                 '''
 
