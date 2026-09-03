@@ -54,13 +54,14 @@ pipeline {
                     # Clean any dangling container first
                     docker rm -f chandas-test-db 2>/dev/null || true
 
-                    # Inspect Jenkins container network so the test DB joins the exact same network
-                    JENKINS_NET=$(docker inspect jenkins --format '{{range $net, $v := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null || echo "bridge")
+                    # Auto-detect Jenkins container network name or fallback to jenkins-docker_default
+                    JENKINS_NET=$(docker inspect ${HOSTNAME} --format '{{range $net, $v := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null || docker inspect jenkins --format '{{range $net, $v := .NetworkSettings.Networks}}{{$net}}{{end}}' 2>/dev/null || echo "jenkins-docker_default")
 
-                    # Start PostgreSQL on the same Docker network with container name as hostname
+                    # Start PostgreSQL on the exact same Docker network
                     docker run -d \
                         --name chandas-test-db \
                         --network "${JENKINS_NET}" \
+                        --network-alias chandas-test-db \
                         -e POSTGRES_DB=collection_db \
                         -e POSTGRES_USER=postgres \
                         -e POSTGRES_PASSWORD=testpassword123 \
