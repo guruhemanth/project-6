@@ -77,14 +77,14 @@ pipeline {
                 echo '🗄️ Initializing database schema & triggers...'
                 sh '''
                     PGPASSWORD=testpassword123 psql \
-                        -h localhost -p 5432 -U postgres -d collection_db \
+                        -h chandas-test-db -p 5432 -U postgres -d collection_db \
                         -f collection-app/server/src/scripts/init-db.sql
                 '''
 
                 echo '🚀 Starting API server for tests...'
                 dir('collection-app/server') {
                     sh '''
-                        DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
+                        DATABASE_URL=postgresql://postgres:testpassword123@chandas-test-db:5432/collection_db \
                         JWT_SECRET=ci_test_secret_key_jenkins \
                         PORT=5099 \
                         NODE_ENV=test \
