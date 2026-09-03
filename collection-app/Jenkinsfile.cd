@@ -1,0 +1,138 @@
+pipeline {
+    agent any
+
+    tools {
+        nodejs 'Nodejs'
+    }
+
+    environment {
+        AWS_REGION     = 'ap-south-1'
+        ECR_REPOSITORY = 'chandas-server'
+        ECS_SERVICE    = 'chandas-service'
+        ECS_CLUSTER    = 'chandas-cluster'
+        S3_BUCKET      = 'chandas-frontend-prod'
+    }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+    }
+
+    stages {
+
+        // ====================================================================
+        // STAGE 1: Authentication with Amazon ECR
+        // ====================================================================
+        stage('🐳 Stage 1: Authenticate with Amazon ECR') {
+            steps {
+                echo '🔑 Logging into Amazon ECR via AWS CLI...'
+                sh '''
+                    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                    docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                '''
+                echo '✅ Docker authenticated with Amazon ECR!'
+            }
+        }
+
+        // ====================================================================
+        // STAGE 2: Build & Push Backend Docker Image to ECR
+        // ====================================================================
+        stage('📦 Stage 2: Build & Push Backend Docker Image') {
+            steps {
+                echo '🏗️ Building backend image and pushing version tags...'
+                sh '''
+                    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                    ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+
+                    docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest server/
+                    docker push ${ECR_REGISTRY}:${BUILD_NUMBER}
+                    docker push ${ECR_REGISTRY}:latest
+                    echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} and latest to ECR!"
+                '''
+            }
+        }
+
+        // ====================================================================
+        // STAGE 3: Zero-Downtime Deployment to AWS ECS Fargate
+        // ====================================================================
+        stage('⚡ Stage 3: Deploy Backend to AWS ECS Fargate') {
+            steps {
+                echo '🚀 Triggering rolling update on ECS Fargate cluster...'
+                sh '''
+                    aws ecs update-service \
+                        --cluster ${ECS_CLUSTER} \
+                        --service ${ECS_SERVICE} \
+                        --force-new-deployment \
+                        --region ${AWS_REGION}
+                    echo '✅ ECS Service updated — Zero-downtime deployment in progress!'
+                '''
+            }
+        }
+
+        // ====================================================================
+        // STAGE 4: Build & Deploy Frontend to S3 + CloudFront Invalidation
+        // ====================================================================
+        stage('🌐 Stage 4: Deploy Frontend to S3 & CloudFront') {
+            steps {
+                echo '⚡ Building production React SPA bundle...'
+                dir('client') {
+                    sh 'npm ci'
+                    sh 'npm run build'
+                }
+
+                echo '☁️ Syncing build artifacts to S3 bucket...'
+                sh '''
+                    aws s3 sync client/dist/ s3://${S3_BUCKET} \
+                        --delete \
+                        --region ${AWS_REGION}
+                '''
+
+                echo '🔄 Invalidating CloudFront edge cache...'
+                sh '''
+                    DISTRIBUTION_ID=$(aws cloudfront list-distributions \
+                        --query "DistributionList.Items[?Origins.Items[?DomainName=='${S3_BUCKET}.s3.amazonaws.com']].Id" \
+                        --output text 2>/dev/null || echo "")
+
+                    if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
+                        aws cloudfront create-invalidation \
+                            --distribution-id "$DISTRIBUTION_ID" \
+                            --paths "/*"
+                        echo "✅ CloudFront cache invalidated! (ID: $DISTRIBUTION_ID)"
+                    else
+                        echo "ℹ️ No matching CloudFront distribution found. Skipping cache invalidation."
+                    fi
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+            ╔══════════════════════════════════════════════════╗
+            ║   🚀 Continuous Deployment (CD) Succeeded!       ║
+            ║   🏛️ Production Stack Live on AWS ECS & S3       ║
+            ╚══════════════════════════════════════════════════╝
+            '''
+        }
+        failure {
+            echo '''
+            ╔══════════════════════════════════════════════════╗
+            ║   ❌ Continuous Deployment (CD) Failed!          ║
+            ║   Check AWS ECS / ECR / S3 credentials and logs. ║
+            ╚══════════════════════════════════════════════════╝
+            '''
+        }
+        always {
+            echo '🧹 Cleaning up local Docker images...'
+            sh '''
+                ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+                if [ -n "$ACCOUNT_ID" ]; then
+                    docker rmi ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER} 2>/dev/null || true
+                fi
+            '''
+        }
+    }
+}

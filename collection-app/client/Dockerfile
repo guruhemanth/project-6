@@ -1,5 +1,5 @@
 # Stage 1: Build React application with Vite
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -11,6 +11,9 @@ RUN npm run build
 
 # Stage 2: Serve production build via lightweight Nginx Alpine
 FROM nginx:alpine
+
+# Patch OS packages
+RUN apk update && apk upgrade --no-cache
 
 # Copy built frontend assets
 COPY --from=builder /app/dist /usr/share/nginx/html

@@ -5,18 +5,10 @@ pipeline {
         nodejs 'Nodejs'
     }
 
-    environment {
-        AWS_REGION     = 'ap-south-1'
-        ECR_REPOSITORY = 'chandas-server'
-        ECS_SERVICE    = 'chandas-service'
-        ECS_CLUSTER    = 'chandas-cluster'
-        S3_BUCKET      = 'chandas-frontend-prod'
-    }
-
     options {
         timestamps()
         disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        buildDiscarder(logRotator(numToKeepStr: '15'))
     }
 
     stages {
@@ -53,7 +45,7 @@ pipeline {
         }
 
         // ====================================================================
-        // STAGE 2: Automated Testing (34 Integration Tests)
+        // STAGE 2: Automated Integration Tests
         // ====================================================================
         stage('🧪 Stage 2: Automated Integration Tests') {
             steps {
@@ -110,7 +102,7 @@ pipeline {
                         done
                     '''
 
-                    echo '🧪 Running 34 integration tests...'
+                    echo '🧪 Running full integration test suite...'
                     sh '''
                         TEST_API_URL=http://127.0.0.1:5099 \
                         DATABASE_URL=postgresql://postgres:testpassword123@localhost:5433/collection_db \
@@ -220,115 +212,26 @@ pipeline {
                 }
             }
         }
-
-        // ====================================================================
-        // STAGE 4: Build, Push to ECR & Deploy to AWS
-        // Only on main/master branch
-        // ====================================================================
-        stage('🚀 Stage 4: Docker Build, Push & AWS Deploy') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                }
-            }
-            stages {
-
-                stage('🐳 Login to Amazon ECR') {
-                    steps {
-                        echo '🔑 Authenticating Docker with Amazon ECR (using Jenkins server AWS config)...'
-                        sh '''
-                            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-                            aws ecr get-login-password --region ${AWS_REGION} | \
-                            docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
-                        '''
-                        echo '✅ Docker logged in to Amazon ECR!'
-                    }
-                }
-
-                stage('📦 Build & Push Backend Image to ECR') {
-                    steps {
-                        echo '🏗️ Building production Docker image and pushing to ECR...'
-                        sh '''
-                            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-                            ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
-
-                            docker build -t ${ECR_REGISTRY}:${BUILD_NUMBER} -t ${ECR_REGISTRY}:latest server/
-                            docker push ${ECR_REGISTRY}:${BUILD_NUMBER}
-                            docker push ${ECR_REGISTRY}:latest
-                            echo "✅ Pushed ${ECR_REGISTRY}:${BUILD_NUMBER} to ECR!"
-                        '''
-                    }
-                }
-
-                stage('⚡ Deploy Backend to AWS ECS Fargate') {
-                    steps {
-                        echo '🚀 Triggering Zero-Downtime Rolling Deployment on ECS Fargate...'
-                        sh '''
-                            aws ecs update-service \
-                                --cluster ${ECS_CLUSTER} \
-                                --service ${ECS_SERVICE} \
-                                --force-new-deployment \
-                                --region ${AWS_REGION}
-                            echo '✅ ECS service updated — rolling deployment in progress!'
-                        '''
-                    }
-                }
-
-                stage('🌐 Build & Deploy Frontend to S3 + CloudFront') {
-                    steps {
-                        echo '⚡ Building React SPA production bundle...'
-                        dir('client') {
-                            sh 'npm ci'
-                            sh 'npm run build'
-                        }
-
-                        echo '☁️ Syncing React build artifacts to Amazon S3...'
-                        sh '''
-                            aws s3 sync client/dist/ s3://${S3_BUCKET} \
-                                --delete \
-                                --region ${AWS_REGION}
-                        '''
-
-                        echo '🔄 Invalidating CloudFront edge cache...'
-                        sh '''
-                            DISTRIBUTION_ID=$(aws cloudfront list-distributions \
-                                --query "DistributionList.Items[?Origins.Items[?DomainName=='${S3_BUCKET}.s3.amazonaws.com']].Id" \
-                                --output text 2>/dev/null || echo "")
-
-                            if [ -n "$DISTRIBUTION_ID" ] && [ "$DISTRIBUTION_ID" != "None" ]; then
-                                aws cloudfront create-invalidation \
-                                    --distribution-id "$DISTRIBUTION_ID" \
-                                    --paths "/*"
-                                echo "✅ CloudFront cache invalidated! (ID: $DISTRIBUTION_ID)"
-                            else
-                                echo "ℹ️ No CloudFront distribution found matching S3 origin. Skipping cache invalidation."
-                            fi
-                        '''
-                    }
-                }
-            }
-        }
     }
 
     post {
         success {
             echo '''
             ╔══════════════════════════════════════════════════╗
-            ║   ✅ CI/CD Pipeline Completed Successfully!      ║
-            ║   🏛️ Chandas Collection App Deployed to AWS     ║
+            ║   ✅ Continuous Integration (CI) Passed!        ║
+            ║   All Linting, Tests, & Security Scans Green    ║
             ╚══════════════════════════════════════════════════╝
             '''
         }
         failure {
             echo '''
             ╔══════════════════════════════════════════════════╗
-            ║   ❌ Pipeline Failed! Review logs above.         ║
+            ║   ❌ CI Pipeline Failed! Review logs above.      ║
             ╚══════════════════════════════════════════════════╝
             '''
         }
         always {
-            echo '🧹 Cleaning up workspace and containers...'
+            echo '🧹 CI completed.'
         }
     }
 }
