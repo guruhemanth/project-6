@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config({ override: true });
+dotenv.config();
 
 const { Pool } = pg;
 
