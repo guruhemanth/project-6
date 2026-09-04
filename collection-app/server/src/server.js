@@ -11,7 +11,7 @@ import collectionRoutes from './routes/collectionRoutes.js';
 import historyRoutes from './routes/historyRoutes.js';
 import expenseRoutes from './routes/expenseRoutes.js';
 
-dotenv.config({ override: true });
+dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
