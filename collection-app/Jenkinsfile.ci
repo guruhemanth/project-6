@@ -147,10 +147,10 @@ pipeline {
                         echo '🔐 Scanning for leaked secrets & credentials...'
                         sh '''
                             docker run --rm \
-                                -v $(pwd)/collection-app:/repo \
+                                --volumes-from ${HOSTNAME} \
                                 zricethezav/gitleaks:latest \
                                 detect \
-                                --source=/repo \
+                                --source=$(pwd)/collection-app \
                                 --no-git \
                                 --redact || echo "⚠️ Gitleaks completed (review any findings above)."
                         '''
@@ -162,14 +162,14 @@ pipeline {
                         echo '🔬 Running Semgrep Static Application Security Testing (OWASP Top 10)...'
                         sh '''
                             docker run --rm \
-                                -v $(pwd)/collection-app:/src \
+                                --volumes-from ${HOSTNAME} \
                                 returntocorp/semgrep:latest \
                                 semgrep \
                                 --config=p/security-audit \
                                 --config=p/owasp-top-ten \
                                 --config=p/javascript \
                                 --config=p/nodejs \
-                                /src/server/src \
+                                $(pwd)/collection-app/server/src \
                                 --text \
                                 --no-error || echo "⚠️ Semgrep completed (review any findings above)."
                         '''
