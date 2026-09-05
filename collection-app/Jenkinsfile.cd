@@ -79,7 +79,11 @@ pipeline {
                 echo '⚡ Building production React SPA bundle...'
                 dir('collection-app/client') {
                     sh 'if [ -f package-lock.json ]; then npm ci; else npm install; fi'
-                    sh 'npm run build'
+                    sh '''
+                        VITE_API_URL=http://chandas-alb-324567115.ap-south-1.elb.amazonaws.com \
+                        VITE_SOCKET_URL=http://chandas-alb-324567115.ap-south-1.elb.amazonaws.com \
+                        npm run build
+                    '''
                 }
 
                 echo '☁️ Syncing build artifacts to S3 bucket...'
