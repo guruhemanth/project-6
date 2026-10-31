@@ -1,0 +1,15 @@
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: my-app-pod
+    spec:
+      containers:
+      - name: my-app
+        image: nginx:alpine
+        envFrom:
+          # Inject a single value from ConfigMap
+        - configMapRef:
+               name: app-config
+          # Inject a single sensitive value from Sec
+        - secretRef:
+               name: app-secret

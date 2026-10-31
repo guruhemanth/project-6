@@ -1,0 +1,20 @@
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: project6-server
+      namespace: dev
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: server-container
+          image: chandas-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          env:
+            - name: PORT
+              value: "5000"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:postgres@db:5432/collection_db"
+            - name: JWT_SECRET
+              value: "my_secret_key"

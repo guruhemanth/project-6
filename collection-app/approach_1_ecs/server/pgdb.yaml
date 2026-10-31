@@ -1,0 +1,15 @@
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: database
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: db-container
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              value: "postgres"

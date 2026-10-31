@@ -34,6 +34,7 @@ A modern, production-ready, **multi-tenant real-time festival fund collection an
 - 🚀 **[System Updates & Optimizations (docs/UPDATES_AND_OPTIMIZATIONS.md)](docs/UPDATES_AND_OPTIMIZATIONS.md)** — Full-stack updates, security enhancements, Socket.io room partitioning, and automated test suite overview.
 - 🛠️ **[Troubleshooting & Issues Log (docs/TROUBLESHOOTING_AND_RESOLUTIONS.md)](docs/TROUBLESHOOTING_AND_RESOLUTIONS.md)** — Detailed post-mortem of all issues, root causes, debugging steps, and resolutions encountered across the pipeline.
 - ☁️ **[AWS Cloud Infrastructure Plan (docs/AWS_CLOUD_INFRASTRUCTURE_PLAN.md)](docs/AWS_CLOUD_INFRASTRUCTURE_PLAN.md)** — Production AWS architecture (ECS Fargate, RDS Multi-AZ, CloudFront + S3, WAF, and CI/CD).
+- 💰 **[AWS Cost Optimization Plan (docs/COST_OPTIMIZATION_PLAN.md)](docs/COST_OPTIMIZATION_PLAN.md)** — FinOps strategy, NAT elimination, Fargate Spot, seasonal hibernation, and 86% annual cost reduction.
 - 🚀 **[CI/CD Pipeline & Security VAPT (docs/CICD_PIPELINE_AND_VAPT.md)](docs/CICD_PIPELINE_AND_VAPT.md)** — GitHub Actions automated workflow with linting, testing, Semgrep/Trivy VAPT, Docker login, and AWS deployment.
 
 ---

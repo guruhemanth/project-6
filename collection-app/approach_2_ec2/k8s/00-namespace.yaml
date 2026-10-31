@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chandas
+  labels:
+    app.kubernetes.io/name: chandas-collection-app
+    app.kubernetes.io/part-of: chandas-platform
